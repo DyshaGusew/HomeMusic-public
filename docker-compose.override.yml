@@ -1,0 +1,11 @@
+services:
+  embedder:
+    profiles: [disabled]
+  tunnel:
+    profiles: [disabled]
+  navidrome:
+    ports: !override
+      - "127.0.0.1:4533:4533"
+  hub:
+    ports: !override
+      - "127.0.0.1:8080:8080"

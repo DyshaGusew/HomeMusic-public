@@ -1,0 +1,19 @@
+name: Check source branch
+on:
+  pull_request:
+    branches: [prod]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only master may be merged into prod
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != "master" ] || [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            echo "В prod можно мерджить только master этого репозитория"
+            exit 1
+          fi
