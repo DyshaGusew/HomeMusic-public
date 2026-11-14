@@ -202,8 +202,10 @@ def on_answering_servers(info: dict) -> dict:
     switched: dict[str | None, str] = {}
     for f in info.get("formats") or []:
         if isinstance(url := f.get("url"), str):
-            f["url"] = answering_url(url)
-            switched.setdefault(urlsplit(url).hostname, f["url"])
+            new = answering_url(url)
+            f["url"] = new
+            if new != url:
+                switched.setdefault(urlsplit(url).hostname, new)
     for host, url in switched.items():
         _log_switch(f"https://{host}/", url)
     return info
@@ -482,7 +484,7 @@ class YtdlpProvider:
         }
         if self._youtube:
             opts.update({
-                "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+                "extractor_args": {},
                 "retries": 1,
                 "fragment_retries": 1,
                 "extractor_retries": 1,
