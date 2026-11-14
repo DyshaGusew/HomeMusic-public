@@ -24,6 +24,6 @@ jobs:
             cd /home/dysha/HomeMusic-public
             git fetch origin prod
             git checkout prod
-            git pull --ff-only origin prod
+            git reset --hard origin/prod
             docker compose up -d --build
             docker image prune -f
