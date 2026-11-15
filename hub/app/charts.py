@@ -406,7 +406,7 @@ def _library_to_catalog(t) -> CatalogTrack:
 
 async def _personal_library_tracks(chart_id: str, user_id: int, limit: int = 50) -> list[CatalogTrack]:
     """User's library tracks whose artists' Last.fm tags match the mood (no GPU)."""
-    from sqlalchemy import desc, func, select
+    from sqlalchemy import desc, func, or_, select
 
     from app.db import session_scope
     from app.mixes.sources import lastfm_artist_tags, lastfm_configured
@@ -416,24 +416,52 @@ async def _personal_library_tracks(chart_id: str, user_id: int, limit: int = 50)
     mood_word = (CHARTS[chart_id].lastfm_tag or chart_id).casefold()
 
     async with session_scope() as s:
-        # Artists the user actually interacts with, most active first.
-        q = (
-            select(Track.artist, func.count(PlayEvent.id).label("c"))
-            .select_from(PlayEvent)
-            .join(Track, (Track.nd_song_id == PlayEvent.nd_song_id) | (Track.deezer_track_id == PlayEvent.ref))
-            .where(PlayEvent.user_id == user_id, PlayEvent.event.in_(("finish", "like", "start")))
+        # Tracks the user interacted with in the library (by Navidrome song id).
+        played_ids = (
+            select(PlayEvent.nd_song_id)
+            .where(
+                PlayEvent.user_id == user_id,
+                PlayEvent.event.in_(("finish", "like", "start")),
+                PlayEvent.nd_song_id.is_not(None),
+            )
+            .distinct()
+            .subquery()
+        )
+        q_played = (
+            select(Track.artist, func.count(Track.id).label("c"))
+            .where(Track.nd_song_id.in_(select(played_ids.c.nd_song_id)))
             .group_by(Track.artist)
             .order_by(desc("c"))
             .limit(40)
         )
-        artists = [r[0] for r in (await s.execute(q)).all() if r[0]]
+        artists = [r[0] for r in (await s.execute(q_played)).all() if r[0]]
 
-        # Fallback: artists present in user's library at all.
+        # Also consider artists from liked/played catalog refs that map to library tracks.
+        if len(artists) < 15:
+            q_ref = (
+                select(Track.artist, func.count(PlayEvent.id).label("c"))
+                .select_from(PlayEvent)
+                .join(Track, func.replace(PlayEvent.ref, "dz:", "") == Track.deezer_track_id)
+                .where(
+                    PlayEvent.user_id == user_id,
+                    PlayEvent.event.in_(("finish", "like", "start")),
+                    PlayEvent.ref.like("dz:%"),
+                    Track.deezer_track_id.is_not(None),
+                )
+                .group_by(Track.artist)
+                .order_by(desc("c"))
+                .limit(30)
+            )
+            for a, _ in (await s.execute(q_ref)).all():
+                if a and a not in artists:
+                    artists.append(a)
+
+        # Fallback: any artists present in the library.
         if not artists:
             r = await s.execute(select(Track.artist).distinct().limit(40))
             artists = [x[0] for x in r.all() if x[0]]
 
-        matched_artists: set[str] = set()
+        matched_artists: list[str] = []
         if lastfm_configured() and (keywords or mood_word):
             for a in artists[:30]:
                 try:
@@ -442,30 +470,46 @@ async def _personal_library_tracks(chart_id: str, user_id: int, limit: int = 50)
                     tags = []
                 blob = " ".join(tags)
                 if any(k in blob for k in keywords) or (mood_word and mood_word in blob):
-                    matched_artists.add(a)
-        else:
-            # No Last.fm: use genre text on tracks as a weak signal.
-            matched_artists = set(artists[:20])
-
+                    matched_artists.append(a)
         if not matched_artists:
-            # As a fallback take top interacted artists so there is still "my tracks" context.
-            matched_artists = set(artists[:15])
+            # Keep it personal even without tag matches: prefer the user's active artists.
+            matched_artists = list(dict.fromkeys(artists[:20]))
 
-        # Pick library tracks by those artists, prefer recently played/liked.
-        r = await s.execute(
-            select(Track)
-            .where(Track.artist.in_(list(matched_artists)))
-            .order_by(desc(Track.id))
-            .limit(300)
-        )
-        rows = r.scalars().all()
+        # Fetch user's own played library tracks first (best "my tracks"), then others by matched artists.
+        played_rows = (
+            await s.execute(
+                select(Track)
+                .where(Track.nd_song_id.in_(select(played_ids.c.nd_song_id)))
+                .order_by(desc(Track.id))
+                .limit(400)
+            )
+        ).scalars().all()
 
-    # Dedupe by (artist,title), prefer entries with nd_song_id.
+        other_rows = []
+        if matched_artists:
+            other_rows = (
+                await s.execute(
+                    select(Track)
+                    .where(Track.artist.in_(matched_artists))
+                    .order_by(desc(Track.id))
+                    .limit(400)
+                )
+            ).scalars().all()
+
+    # Prefer played tracks whose artists match mood; otherwise include played tracks and matched-artist tracks.
+    played_set = {t.id for t in played_rows}
+    matched_set = set(matched_artists)
+    candidates = []
+    # 1) played tracks by mood-matched artists
+    candidates += [t for t in played_rows if t.artist in matched_set]
+    # 2) other played tracks (still "my tracks")
+    candidates += [t for t in played_rows if t.artist not in matched_set]
+    # 3) library tracks by matched artists not yet included
+    candidates += [t for t in other_rows if t.id not in played_set]
+
     seen: set[str] = set()
     out: list[CatalogTrack] = []
-    # simple day-stable-ish shuffle using hash of ids to vary a bit
-    rows_sorted = sorted(rows, key=lambda t: (0 if t.nd_song_id else 1, hash((user_id, chart_id, t.id)) % 997))
-    for t in rows_sorted:
+    for t in candidates:
         key = fingerprint(t.artist or "", t.title or "")
         if not key or key in seen:
             continue
@@ -473,6 +517,42 @@ async def _personal_library_tracks(chart_id: str, user_id: int, limit: int = 50)
         out.append(_library_to_catalog(t))
         if len(out) >= limit:
             break
+    return out
+
+
+async def _personal_similar_catalog(mine: list[CatalogTrack], limit: int = 30) -> list[CatalogTrack]:
+    """Catalog tracks similar to user's own mood picks (helps keep recommendations close to user's taste/language)."""
+    from app.mixes.sources import lastfm_configured, lastfm_similar_tracks
+
+    if not mine or not lastfm_configured():
+        return []
+    seeds = []
+    seen_seed: set[str] = set()
+    for t in mine:
+        key = fingerprint(t.artist or "", t.title or "")
+        if not key or key in seen_seed or not t.artist or not t.title:
+            continue
+        seen_seed.add(key)
+        seeds.append((t.artist, t.title))
+        if len(seeds) >= 3:
+            break
+    out: list[CatalogTrack] = []
+    seen: set[str] = set()
+    for artist, title in seeds:
+        try:
+            hits = await lastfm_similar_tracks(artist, title, limit=15)
+            if not hits:
+                continue
+            found = await _resolve("lastfm", hits)
+            for t in found:
+                if t.ref in seen:
+                    continue
+                seen.add(t.ref)
+                out.append(t)
+                if len(out) >= limit:
+                    return out
+        except Exception:
+            continue
     return out
 
 
@@ -503,9 +583,17 @@ async def personal_tracks(chart_id: str, user_id: int) -> Built:
         log.warning("chart %s: personal library tracks failed: %r", chart_id, e)
         mine = []
 
-    # Interleave mine and catalog so the list contains both.
-    mixed = by_turns([mine, catalog] if mine else [catalog]) if catalog else list(mine)
-    if not mixed and not mine and not catalog:
+    # Catalog similar to user's own picks keeps recommendations closer to the user's taste/language.
+    try:
+        similar = await _personal_similar_catalog(mine)
+    except Exception as e:
+        log.warning("chart %s: personal similar catalog failed: %r", chart_id, e)
+        similar = []
+
+    # Interleave mine and catalog/similar so the list contains both.
+    pools = [p for p in [mine, similar, catalog] if p]
+    mixed = by_turns(pools) if pools else []
+    if not mixed:
         raise ChartError("не удалось подобрать треки по настроению")
     mixed = mixed[:SIZE]
     return Built(mixed, time.time(), list(range(1, len(mixed) + 1)))
