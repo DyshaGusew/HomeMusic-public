@@ -658,19 +658,26 @@ class ImportAuthOut(BaseModel):
 
 
 class ImportStatsOut(BaseModel):
+    """Every selected track is counted once. What it is: owned + exact + probable + not_found + pending == tracks
+    (`exact` includes the ones the user picked by hand). Where it is: done + downloading + waiting + failed + the
+    rest (not matched, not found, owned) == tracks; so downloaded tracks stay in the report."""
+
     tracks: int = 0  # distinct tracks in the selected collections (likes, playlists)
     owned: int = 0  # of them in the library already
     to_download: int = 0  # the rest (an estimate before matching)
     est_bytes: int = 0  # disk space `to_download` takes (320 kbps)
     free_bytes: int | None = None  # free space on the music disk
-    pending: int = 0  # rows not matched yet
+    pending: int = 0  # tracks not matched yet
     exact: int = 0
     probable: int = 0
     not_found: int = 0
     waiting: int = 0  # economy: matched, downloaded once listened to
-    downloading: int = 0  # downloads of the import under way
-    done: int = 0
+    downloading: int = 0  # tracks being downloaded
+    done: int = 0  # tracks downloaded by this import
     failed: int = 0
+    extras: int = 0  # selected albums and artists
+    extras_done: int = 0  # of them finished
+    activity_at: datetime | None = None  # the last download of the import (None: none yet)
 
 
 class ImportCollectionOut(BaseModel):
@@ -950,19 +957,20 @@ class TasteArtistsIn(BaseModel):
 
 
 class WaveSeedIn(BaseModel):
-    """What a wave starts from: a catalog track, a known search file, a library song or an artist."""
+    """What a wave starts from: a catalog track, a known search file, a library song, an artist or a chart."""
 
     ref: str | None = Field(default=None, max_length=64)  # "dz:…", "nd:<song>" or "file:<provider>:<id>"
     nd_song_id: str | None = Field(default=None, max_length=64)
     artist_ref: str | None = Field(default=None, max_length=64)  # "dz:…"
     nd_artist_id: str | None = Field(default=None, max_length=64)  # a Navidrome artist (the app's «Радиостанции»)
+    chart: str | None = Field(default=None, max_length=32, pattern=r"^[a-z_]+$")  # a chart or genre (GET /api/charts)
 
     by_artist: bool = False  # resolve the artist of the supplied track
 
     @model_validator(mode="after")
     def _names_one(self) -> WaveSeedIn:
-        if not (self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id):
-            raise ValueError("ref, nd_song_id, artist_ref or nd_artist_id is required")
+        if not (self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id or self.chart):
+            raise ValueError("ref, nd_song_id, artist_ref, nd_artist_id or chart is required")
         return self
 
 
@@ -1002,6 +1010,33 @@ class WaveOut(BaseModel):
     tracks: list[WaveTrackOut] = []  # the next ones (up to 5): they replace the client's `queued`
     pending: bool = False  # sources still answer: the pool grows (an empty `tracks` — ask again in a few seconds)
     recorded: PlayEventsOut | None = None  # what became of `played` (next only)
+
+
+# --- charts and genres (app/charts.py) -------------------------------------------------------------------------------
+
+
+class ChartOut(BaseModel):
+    id: str
+    title: str  # the card's: «Россия», «Русский рок»
+    name: str  # the page's and the wave's: «Чарт России»
+    kind: Literal["country", "genre"]
+    group: Literal["main", "europe", "ru_genres", "genres"]  # the Home screen's rows, in this order
+    source: str  # «Яндекс Музыка», «Deezer»
+    covers: list[str] = []  # the first tracks' covers (a collage); none until the chart was made once
+    updated_at: datetime | None = None
+
+
+class ChartsOut(BaseModel):
+    charts: list[ChartOut] = []
+
+
+class ChartTrackOut(TrackOut):
+    position: int  # its place in the chart
+
+
+class ChartPageOut(BaseModel):
+    chart: ChartOut
+    tracks: list[ChartTrackOut] = []
 
 
 # --- smart shuffle (MIXES.md 8) ------------------------------------------------------------------------------------
