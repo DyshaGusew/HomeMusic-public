@@ -7,7 +7,7 @@ Sources (checked 2026-11 from a server outside Russia):
 - USA, the European countries, Ukraine, the world — the «Top <country>» playlists of Deezer Charts (Deezer tracks as
   they are). «Европа» — the first places of its countries by turns.
 - Genres — Deezer's chart of the genre (`chart/<genre>/tracks`; Deezer picks the country by the caller's address,
-  the server's); Russian genres — Yandex Music's editorial playlists of a tag («Русский рок» …), by turns.
+  the server's); Russian genres — Deezer playlists first, Last.fm tag top tracks as a fallback.
 Names of Yandex and Apple are matched with the Deezer catalog the way mixes do it (`app.mixes.resolve.resolve_hits`:
 only a sure match; a song the library has plays from it).
 
@@ -60,6 +60,8 @@ class Chart:
     yandex_tag: str | None = None
     apple: str | None = None  # Apple Music's country: the chart when Yandex's fails
     parts: tuple[str, ...] = ()  # charts merged by turns («Европа»)
+    dz_playlists: tuple[int, ...] = ()  # Deezer playlist fallbacks (return CatalogTrack directly)
+    lastfm_tag: str = ""  # Last.fm tag fallback (names resolved via catalog)
 
 
 def _country(id_: str, title: str, name: str, playlist: int, group: str = "europe") -> Chart:
@@ -70,8 +72,8 @@ def _genre(id_: str, title: str, genre: int) -> Chart:
     return Chart(id_, title, title, "genre", "genres", "Deezer", deezer_genre=genre)
 
 
-def _ru_genre(id_: str, title: str, tag: str) -> Chart:
-    return Chart(id_, title, title, "genre", "ru_genres", "Яндекс Музыка", yandex_tag=tag)
+def _ru_genre(id_: str, title: str, dz: tuple[int, ...] = (), lfm: str = "") -> Chart:
+    return Chart(id_, title, title, "genre", "ru_genres", "Deezer", dz_playlists=dz, lastfm_tag=lfm)
 
 
 EUROPE = ("gb", "de", "fr", "it", "es", "pl", "nl")
@@ -88,10 +90,10 @@ CHARTS: dict[str, Chart] = {c.id: c for c in [
     _country("pl", "Польша", "Чарт Польши", 1266972311),
     _country("nl", "Нидерланды", "Чарт Нидерландов", 1266971851),
     _country("ua", "Украина", "Чарт Украины", 1362526495),
-    _ru_genre("rusrock", "Русский рок", "rusrock"),
-    _ru_genre("rusrap", "Русский рэп", "rusrap"),
-    _ru_genre("ruspop", "Русская поп-музыка", "ruspop"),
-    _ru_genre("phonk", "Фонк", "phonk"),
+    _ru_genre("rusrock", "Русский рок", dz=(8100066862, 3459300842), lfm="russian rock"),
+    _ru_genre("rusrap", "Русский рэп", dz=(6829975944,), lfm="russian hip hop"),
+    _ru_genre("ruspop", "Русская поп-музыка", dz=(15559465163,), lfm="russian pop"),
+    _ru_genre("phonk", "Фонк", dz=(10240601242,), lfm="phonk"),
     _genre("pop", "Поп", 132),
     _genre("hiphop", "Хип-хоп", 116),
     _genre("rock", "Рок", 152),
@@ -243,10 +245,59 @@ async def _make(c: Chart) -> list[CatalogTrack]:
                 raise ChartError(f"Яндекс Музыка: {e!r}") from e
             log.warning("chart %s: Yandex failed (%r), Apple Music's instead", c.id, e)
     if c.yandex_tag:
+        yerr: Exception | None = None
         try:
-            return await _resolve("yandex", await asyncio.to_thread(_yandex_tag_sync, c.yandex_tag))
+            if found := await _resolve("yandex", await asyncio.to_thread(_yandex_tag_sync, c.yandex_tag)):
+                return found
+            log.warning("chart %s: Yandex gave nothing, trying fallbacks", c.id)
+            yerr = ChartError("Яндекс Музыка: пустой ответ")
         except Exception as e:
-            raise ChartError(f"Яндекс Музыка: {e!r}") from e
+            yerr = e
+            log.warning("chart %s: Yandex failed (%r), trying fallbacks", c.id, e)
+        # fallback 1: Deezer playlists (already CatalogTrack, resolve not needed)
+        if c.dz_playlists and svc.deezer is not None:
+            tracks_out: list[CatalogTrack] = []
+            for pid in c.dz_playlists:
+                try:
+                    tracks_out += await svc.deezer.playlist_tracks(pid, limit=SIZE)
+                except Exception as e:
+                    log.warning("chart %s: Deezer playlist %s failed: %r", c.id, pid, e)
+            tracks_out = _dedupe_tracks(tracks_out)
+            if tracks_out:
+                return tracks_out[:SIZE]
+        # fallback 2: Last.fm tag (names -> resolve)
+        if c.lastfm_tag:
+            try:
+                hits = await _lastfm_tag(c.lastfm_tag)
+                if hits:
+                    found = await _resolve("lastfm", hits)
+                    if found:
+                        return found
+            except Exception as e:
+                log.warning("chart %s: Last.fm tag %r failed: %r", c.id, c.lastfm_tag, e)
+        raise ChartError(f"Яндекс Музыка: {yerr!r}") from yerr
+    if c.dz_playlists or c.lastfm_tag:
+        # Deezer playlists first (CatalogTrack), Last.fm tag names as fallback.
+        if c.dz_playlists and svc.deezer is not None:
+            tracks_out: list[CatalogTrack] = []
+            for pid in c.dz_playlists:
+                try:
+                    tracks_out += await svc.deezer.playlist_tracks(pid, limit=SIZE)
+                except Exception as e:
+                    log.warning("chart %s: Deezer playlist %s failed: %r", c.id, pid, e)
+            tracks_out = _dedupe_tracks(tracks_out)
+            if tracks_out:
+                return tracks_out[:SIZE]
+        if c.lastfm_tag:
+            try:
+                hits = await _lastfm_tag(c.lastfm_tag)
+                if hits:
+                    found = await _resolve("lastfm", hits)
+                    if found:
+                        return found
+            except Exception as e:
+                log.warning("chart %s: Last.fm tag %r failed: %r", c.id, c.lastfm_tag, e)
+        raise ChartError("источник ничего не вернул")
     if c.apple:
         try:
             return await _resolve("apple", await _apple(c.apple))
@@ -270,6 +321,21 @@ def by_turns(lists: list[list[CatalogTrack]], size: int = SIZE) -> list[CatalogT
             out.append(t)
             if len(out) >= size:
                 return out
+    return out
+
+
+def _dedupe_tracks(tracks: list[CatalogTrack], size: int = SIZE) -> list[CatalogTrack]:
+    """Keep first occurrence of each track by ref and by artist + title."""
+    out: list[CatalogTrack] = []
+    seen: set[str] = set()
+    for t in tracks:
+        keys = {t.ref, fingerprint(t.artist, t.title)}
+        if keys & seen:
+            continue
+        seen |= keys
+        out.append(t)
+        if len(out) >= size:
+            return out
     return out
 
 
@@ -336,3 +402,21 @@ async def _apple(country: str) -> list:
         await client.aclose()
     return [Hit(artist=x.get("artistName") or "", title=x.get("name") or "", source_id=f"apple:{x.get('id')}")
             for x in rows]
+
+
+async def _lastfm_tag(tag: str, limit: int = SIZE) -> list:
+    """Top tracks for a Last.fm tag as Hits (names to be resolved against catalog)."""
+    from app.mixes.sources import Hit, _as_list, _lastfm, lastfm_configured
+
+    if not lastfm_configured():
+        return []
+    body = await _lastfm("tag.getTopTracks", tag=tag, limit=limit)
+    hits: list[Hit] = []
+    for t in _as_list((body.get("tracks") or {}).get("track")):
+        artist = t.get("artist")
+        if isinstance(artist, dict):
+            artist = artist.get("name") or ""
+        title = t.get("name") or ""
+        if artist and title:
+            hits.append(Hit(artist=artist, title=title))
+    return hits[:limit]
