@@ -1020,7 +1020,7 @@ class ChartOut(BaseModel):
     title: str  # the card's: «Россия», «Русский рок»
     name: str  # the page's and the wave's: «Чарт России»
     kind: Literal["country", "genre"]
-    group: Literal["main", "europe", "ru_genres", "genres"]  # the Home screen's rows, in this order
+    group: Literal["main", "europe", "ru_genres", "genres", "moods"]  # the Home screen's rows, in this order
     source: str  # «Яндекс Музыка», «Deezer»
     covers: list[str] = []  # the first tracks' covers (a collage); none until the chart was made once
     updated_at: datetime | None = None

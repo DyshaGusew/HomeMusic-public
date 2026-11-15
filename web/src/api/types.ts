@@ -1045,8 +1045,8 @@ export interface ChartOut {
   /** the page's and the wave's: «Чарт России» */
   name: string;
   kind: 'country' | 'genre';
-  /** the rows, in this order: main (Россия, США, Европа, Мир), europe (the countries), ru_genres, genres */
-  group: 'main' | 'europe' | 'ru_genres' | 'genres';
+  /** the rows, in this order: main (Россия, США, Европа, Мир), europe (the countries), ru_genres, moods, genres */
+  group: 'main' | 'europe' | 'ru_genres' | 'genres' | 'moods';
   /** «Яндекс Музыка», «Deezer» */
   source: string;
   /** the first tracks' covers (a collage); empty until the chart was made once */

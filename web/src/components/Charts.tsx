@@ -16,6 +16,7 @@ export function ChartsSection() {
   if (!charts.length) return null;
   const of = (g: ChartOut['group']) => charts.filter((c) => c.group === g);
   const genres = [...of('ru_genres'), ...of('genres')];
+  const moods = of('moods');
   const shown = allGenres ? genres : genres.slice(0, GENRES_SHOWN);
 
   return (
@@ -40,6 +41,20 @@ export function ChartsSection() {
           ))}
         </div>
       </section>
+      {moods.length > 0 && (
+        <section aria-label="Настроение">
+          <SectionTitle>Настроение</SectionTitle>
+          <p className="px-4 -mt-1 mb-2 text-xs text-muted">Подборки под ваш вкус: ваши треки и рекомендации</p>
+          <div className="grid grid-cols-2 gap-2 px-4 sm:grid-cols-3 lg:grid-cols-4">
+            {moods.map((c, i) => (
+              <Link key={c.id} to={`/chart/${enc(c.id)}`} aria-label={c.name} style={{ background: tone(i + 6) }}
+                className="flex min-h-14 items-end rounded-lg px-3 py-2 text-[15px] font-bold leading-tight text-white shadow-sm transition hover:brightness-110">
+                {c.title}
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
       <section aria-label="Жанры">
         <SectionTitle>Жанры</SectionTitle>
         <div className="grid grid-cols-2 gap-2 px-4 sm:grid-cols-3 lg:grid-cols-4">
