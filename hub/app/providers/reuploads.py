@@ -130,7 +130,7 @@ class YtReuploadProvider(YtdlpProvider):
         texts = reupload_queries(q)
         searches = [
             self._run(self._extract, ytsearch_query(self.cfg.search_prefix, t, limit), extract_flat="in_playlist",
-                      noplaylist=False)
+                      noplaylist=False, ignoreerrors=True)
             for t in texts
         ]
         out: list[Candidate] = []
@@ -192,7 +192,8 @@ class SoundcloudProvider(YtdlpProvider):
     async def search(self, q: TrackQuery, limit: int = 10) -> list[Candidate]:
         texts = reupload_queries(q)
         searches = [
-            self._run(self._extract, f"scsearch{max(1, limit)}:{t}", extract_flat="in_playlist", noplaylist=False)
+            self._run(self._extract, f"scsearch{max(1, limit)}:{t}", extract_flat="in_playlist", noplaylist=False,
+                      ignoreerrors=True)
             for t in texts
         ]
         out: list[Candidate] = []
